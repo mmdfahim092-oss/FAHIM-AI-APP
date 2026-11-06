@@ -1,0 +1,12 @@
+{
+  "name": "FAHIM AI — Personal Voice, Screen Vision & Trading Assistant",
+  "description": "Futuristic JARVIS-inspired personal AI assistant with voice conversation, live screen capture vision, trading market chart analysis, camera scanner, and memory vault in Bengali and English.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "display-capture"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
