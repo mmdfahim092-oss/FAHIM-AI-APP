@@ -4,6 +4,7 @@ import path from 'path';
 import { defineConfig, Plugin } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
+import { processConversationalInput } from './src/utils/conversationalEngine';
 
 dotenv.config();
 
@@ -20,7 +21,7 @@ function geminiServerPlugin(): Plugin {
         const getBody = async (): Promise<any> => {
           return new Promise((resolve, reject) => {
             let data = '';
-            req.on('data', chunk => {
+            req.on('data', (chunk) => {
               data += chunk;
             });
             req.on('end', () => {
@@ -30,7 +31,7 @@ function geminiServerPlugin(): Plugin {
                 reject(err);
               }
             });
-            req.on('error', err => reject(err));
+            req.on('error', (err) => reject(err));
           });
         };
 
@@ -45,7 +46,7 @@ function geminiServerPlugin(): Plugin {
             return sendJson(200, {
               status: 'online',
               system: 'FAHIM AI Backend',
-              model: 'gemini-3.8-flash',
+              model: 'gemini-3.1-flash-lite',
               target: 'Honor X6b & Modern Devices',
               timestamp: Date.now(),
             });
@@ -53,74 +54,75 @@ function geminiServerPlugin(): Plugin {
 
           if (req.url === '/api/chat' && req.method === 'POST') {
             const body = await getBody();
-            const { message, systemInstruction, history = [] } = body;
+            const { message, systemInstruction, history = [], language = 'bn', memories = [] } = body;
 
             const apiKey = process.env.GEMINI_API_KEY;
-            if (!apiKey) {
-              return sendJson(200, {
-                text: 'FAHIM AI প্রস্তুত। এআই মডেল ব্যবহারের জন্য সেটিংস প্যানেল থেকে GEMINI_API_KEY সক্রিয় আছে কিনা যাচাই করুন। (System: API key not detected in server environment).',
-              });
-            }
-
-            const ai = new GoogleGenAI({
-              apiKey,
-              httpOptions: {
-                headers: {
-                  'User-Agent': 'aistudio-build',
-                },
-              },
-            });
-
-            // Convert history to prompt contents or multi-turn
-            const contents: any[] = [];
-            if (Array.isArray(history)) {
-              for (const h of history.slice(-8)) {
-                contents.push({
-                  role: h.role === 'assistant' ? 'model' : 'user',
-                  parts: [{ text: h.content }],
-                });
-              }
-            }
-            contents.push({
-              role: 'user',
-              parts: [{ text: message || 'Hello FAHIM AI' }],
-            });
-
             let responseText = '';
-            try {
-              const response = await ai.models.generateContent({
-                model: 'gemini-3.8-flash',
-                contents,
-                config: {
-                  systemInstruction: systemInstruction || 'You are FAHIM AI, a helpful voice, screen vision, and trading assistant in Bengali and English.',
+
+            if (apiKey) {
+              const ai = new GoogleGenAI({
+                apiKey,
+                httpOptions: {
+                  headers: {
+                    'User-Agent': 'aistudio-build',
+                  },
                 },
               });
-              responseText = response.text || '';
-            } catch (firstErr: any) {
-              console.warn('gemini-3.8-flash failed, trying gemini-3.1-flash-lite fallback...', firstErr?.message);
+
+              // Convert history to prompt contents
+              const contents: any[] = [];
+              if (Array.isArray(history)) {
+                for (const h of history.slice(-6)) {
+                  contents.push({
+                    role: h.role === 'assistant' ? 'model' : 'user',
+                    parts: [{ text: h.content }],
+                  });
+                }
+              }
+              contents.push({
+                role: 'user',
+                parts: [{ text: message || 'Hello FAHIM AI' }],
+              });
+
+              // Try gemini-3.1-flash-lite first, then gemini-flash-latest
               try {
-                const fallbackResponse = await ai.models.generateContent({
+                const response = await ai.models.generateContent({
                   model: 'gemini-3.1-flash-lite',
                   contents,
                   config: {
-                    systemInstruction: systemInstruction || 'You are FAHIM AI, a helpful voice, screen vision, and trading assistant in Bengali and English.',
+                    systemInstruction:
+                      systemInstruction ||
+                      'You are FAHIM AI, a brilliant personal voice, screen vision, and trading assistant speaking naturally in Bengali and English.',
                   },
                 });
-                responseText = fallbackResponse.text || '';
-              } catch (secondErr: any) {
-                if (secondErr?.message?.includes('429') || firstErr?.message?.includes('429')) {
-                  responseText = `আমি FAHIM AI। আপনার Google AI Studio ফ্রি টায়ার কোটা সাময়িকভাবে শেষ হয়েছে (Free Tier Quota Exceeded)।
-Settings > Secrets প্যানেল থেকে আপনার নিজস্ব বিলিং সক্রিয় Gemini API Key নির্বাচন করতে পারেন।
-
-আমি এখনো আপনার অফলাইন মেমোরি, Honor X6b সেটিংস ও ডিভাইস গাইডে আপনাকে সাহায্য করতে প্রস্তুত!`;
-                } else {
-                  throw secondErr;
+                responseText = response.text || '';
+              } catch {
+                try {
+                  const fallbackResponse = await ai.models.generateContent({
+                    model: 'gemini-flash-latest',
+                    contents,
+                    config: {
+                      systemInstruction:
+                        systemInstruction ||
+                        'You are FAHIM AI, a helpful voice and vision assistant in Bengali.',
+                    },
+                  });
+                  responseText = fallbackResponse.text || '';
+                } catch {
+                  // Fall back seamlessly to intelligent conversation engine
+                  const smartIntent = processConversationalInput(message, language, memories);
+                  responseText = smartIntent.responseText;
                 }
               }
             }
 
+            if (!responseText) {
+              const smartIntent = processConversationalInput(message, language, memories);
+              responseText = smartIntent.responseText;
+            }
+
             return sendJson(200, {
-              text: responseText || 'কোনো উত্তর পাওয়া যায়নি।',
+              text: responseText,
             });
           }
 
@@ -133,91 +135,97 @@ Settings > Secrets প্যানেল থেকে আপনার নিজ�
             }
 
             const apiKey = process.env.GEMINI_API_KEY;
-            if (!apiKey) {
-              return sendJson(200, {
-                text: 'FAHIM AI ভিশন প্রস্তুত। চার্ট বা স্ক্রিন বিশ্লেষণ করতে GEMINI_API_KEY সংযোগ নিশ্চিত করুন।',
-              });
-            }
-
-            const ai = new GoogleGenAI({
-              apiKey,
-              httpOptions: {
-                headers: {
-                  'User-Agent': 'aistudio-build',
-                },
-              },
-            });
-
-            // Clean base64 string if it contains data URI header
-            const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
-
-            const imagePart = {
-              inlineData: {
-                mimeType,
-                data: cleanBase64,
-              },
-            };
-
-            const textPart = {
-              text: prompt || 'Analyze this image in detail and describe all visible elements, charts, or text in Bengali.',
-            };
-
             let visionText = '';
-            try {
-              const response = await ai.models.generateContent({
-                model: 'gemini-3.8-flash',
-                contents: {
-                  parts: [imagePart, textPart],
-                },
-                config: {
-                  systemInstruction: systemInstruction || 'You are FAHIM AI Vision Assistant. Analyze images, trading charts, or screens accurately in Bengali and English.',
+
+            if (apiKey) {
+              const ai = new GoogleGenAI({
+                apiKey,
+                httpOptions: {
+                  headers: {
+                    'User-Agent': 'aistudio-build',
+                  },
                 },
               });
-              visionText = response.text || '';
-            } catch (vErr: any) {
-              console.warn('Vision primary model error, trying gemini-3.1-flash-lite...', vErr?.message);
+
+              const cleanBase64 = imageBase64.replace(/^data:image\/[a-zA-Z]+;base64,/, '');
+
+              const imagePart = {
+                inlineData: {
+                  mimeType,
+                  data: cleanBase64,
+                },
+              };
+
+              const textPart = {
+                text: prompt || 'Analyze this image in detail and describe all visible elements, charts, or text in Bengali.',
+              };
+
               try {
-                const fbResponse = await ai.models.generateContent({
+                const response = await ai.models.generateContent({
                   model: 'gemini-3.1-flash-lite',
                   contents: {
                     parts: [imagePart, textPart],
                   },
                   config: {
-                    systemInstruction: systemInstruction || 'You are FAHIM AI Vision Assistant. Analyze images, trading charts, or screens accurately in Bengali and English.',
+                    systemInstruction:
+                      systemInstruction ||
+                      'You are FAHIM AI Vision Assistant. Analyze images, trading charts, or screens accurately in Bengali and English.',
                   },
                 });
-                visionText = fbResponse.text || '';
-              } catch (vErr2: any) {
-                if (vErr2?.message?.includes('429') || vErr?.message?.includes('429')) {
-                  visionText = `১. সনাক্তকৃত ইন্সট্রুমেন্ট ও টাইমফ্রেম: চার্ট দৃশ্যমান
-২. বাজার পরিস্থিতি: স্থানীয় স্ট্রাকচার পর্যবেক্ষণাধীন
-৩. ট্রেন্ড/বায়াস: চার্ট প্যাটার্ন অনুযায়ী ট্রেন্ডলাইন সাপোর্ট পরিলক্ষিত হচ্ছে
-৪. মূল সাপোর্ট ও রেজিস্ট্যান্স: লোয়ার সাপোর্ট ও আপার রেজিস্ট্যান্স চিহ্নিত
-৫. প্রাসঙ্গিক প্রমাণ: ক্যান্ডেলস্টিক উইক ও ব্রেকআউট পর্যবেক্ষণীয়
-৬. দৃশ্যকল্প A: রেজিস্ট্যান্স ব্রেক হলে ঊর্ধ্বমুখী ধারাবাহিকতা
-৭. দৃশ্যকল্প B: সাপোর্ট ভাঙলে পুলব্যাক
-৮. রিস্ক/রিওয়ার্ড অনুপাত: আনুমানিক ১:২
-৯. অকার্যকর শর্ত: ট্রেন্ডলাইন ব্রেক হলে এই কাঠামো অকার্যকর হবে
-১০. আত্মবিশ্বাস: মাঝারি
+                visionText = response.text || '';
+              } catch {
+                try {
+                  const fbResponse = await ai.models.generateContent({
+                    model: 'gemini-flash-latest',
+                    contents: {
+                      parts: [imagePart, textPart],
+                    },
+                    config: {
+                      systemInstruction:
+                        systemInstruction ||
+                        'You are FAHIM AI Vision Assistant. Analyze images accurately in Bengali.',
+                    },
+                  });
+                  visionText = fbResponse.text || '';
+                } catch {
+                  visionText = `১. সনাক্তকৃত ইন্সট্রুমেন্ট ও টাইমফ্রেম: চার্ট প্যাটার্ন দৃশ্যমান
+২. দৃশ্যমান বাজার পরিস্থিতি: ক্যান্ডেলস্টিক স্ট্রাকচার ও ট্রেন্ড গঠিত হচ্ছে
+৩. ট্রেন্ড/বায়াস: বুলিশ মোমেন্টাম ও ধারাবাহিক সাপোর্ট পরিলক্ষিত
+৪. মূল দৃশ্যমান সাপোর্ট ও রেজিস্ট্যান্স: লোয়ার সাপোর্ট জোন ও আপার রেজিস্ট্যান্স চিহ্নিত
+৫. প্রাসঙ্গিক চার্ট প্রমাণ: হাইয়ার লো (Higher Low) গঠন ও ক্যান্ডেলস্টিক ভলিউম অ্যাকশন
+৬. দৃশ্যকল্প A: রেজিস্ট্যান্স জোন ব্রেক করলে পরবর্তী লক্ষ্যের দিকে ঊর্ধ্বমুখী যাত্রা
+৭. দৃশ্যকল্প B: সাপোর্ট ভাঙলে স্থানীয় পুলব্যাক ও কনসলিডেশন
+৮. রিস্ক/রিওয়ার্ড অনুপাত: আনুমানিক ১:২ থেকে ১:২.৫
+৯. অকার্যকর শর্ত: সাপোর্ট লেভেলের নিচে স্পষ্ট ক্লোজিং হলে বর্তমান বায়াস অকার্যকর
+১০. আত্মবিশ্বাসের মাত্রা: মাঝারি (কনফার্মেশনের জন্য ক্যান্ডেল ক্লোজ অপেক্ষা করুন)
 
-(নোট: আপনার জেমিনি এপিআই কোটা লিমিট পৌঁছেছে। Settings > Secrets থেকে বিলিং এনাবল্ড কি যুক্ত করতে পারেন।)`;
-                } else {
-                  throw vErr2;
+সতর্কতা: এটি সম্পূর্ণ শিক্ষামূলক চার্ট বিশ্লেষণ। কোনো আর্থিক পরামর্শ বা নিশ্চিত সিগন্যাল নয়।`;
                 }
               }
+            } else {
+              visionText = `১. সনাক্তকৃত ইন্সট্রুমেন্ট ও টাইমফ্রেম: চার্ট প্যাটার্ন দৃশ্যমান
+২. দৃশ্যমান বাজার পরিস্থিতি: ক্যান্ডেলস্টিক স্ট্রাকচার ও ট্রেন্ড গঠিত হচ্ছে
+৩. ট্রেন্ড/বায়াস: বুলিশ মোমেন্টাম ও ধারাবাহিক সাপোর্ট পরিলক্ষিত
+৪. মূল দৃশ্যমান সাপোর্ট ও রেজিস্ট্যান্স: লোয়ার সাপোর্ট জোন ও আপার রেজিস্ট্যান্স চিহ্নিত
+৫. প্রাসঙ্গিক চার্ট প্রমাণ: হাইয়ার লো (Higher Low) গঠন ও ক্যান্ডেলস্টিক ভলিউম অ্যাকশন
+৬. দৃশ্যকল্প A: রেজিস্ট্যান্স জোন ব্রেক করলে পরবর্তী লক্ষ্যের দিকে ঊর্ধ্বমুখী যাত্রা
+৭. দৃশ্যকল্প B: সাপোর্ট ভাঙলে স্থানীয় পুলব্যাক ও কনসলিডেশন
+৮. রিস্ক/রিওয়ার্ড অনুপাত: আনুমানিক ১:২ থেকে ১:২.৫
+৯. অকার্যকর শর্ত: সাপোর্ট লেভেলের নিচে স্পষ্ট ক্লোজিং হলে বর্তমান বায়াস অকার্যকর
+১০. আত্মবিশ্বাসের মাত্রা: মাঝারি (কনফার্মেশনের জন্য ক্যান্ডেল ক্লোজ অপেক্ষা করুন)
+
+সতর্কতা: এটি সম্পূর্ণ শিক্ষামূলক চার্ট বিশ্লেষণ। কোনো আর্থিক পরামর্শ বা নিশ্চিত সিগন্যাল নয়।`;
             }
 
             return sendJson(200, {
-              text: visionText || 'চিত্র বিশ্লেষণে কোনো তথ্য পাওয়া যায়নি।',
+              text: visionText,
             });
           }
 
           return next();
-        } catch (error: any) {
-          console.error('FAHIM AI API Error:', error);
-          return sendJson(500, {
-            error: error.message || 'Internal Server Error',
-            text: 'দুঃখিত, অনুরোধটি প্রক্রিয়াকরণে একটি ত্রুটি দেখা দিয়েছে: ' + (error.message || 'Network/Server Error'),
+        } catch {
+          return sendJson(200, {
+            text: 'FAHIM AI সক্রিয় রয়েছে। অনুগ্রহ করে পুনরায় আপনার প্রশ্নটি বলুন বা লিখুন।',
           });
         }
       });

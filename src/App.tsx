@@ -27,6 +27,7 @@ import {
   buildScreenVisionPrompt,
   buildCodingPrompt,
 } from './utils/aiPrompts';
+import { processConversationalInput } from './utils/conversationalEngine';
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>('IDLE');
@@ -102,44 +103,69 @@ export default function App() {
   const speakText = (text: string) => {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
 
-    window.speechSynthesis.cancel();
+    try {
+      window.speechSynthesis.cancel();
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      }
 
-    // Clean markdown code blocks from speech for natural audio
-    const cleanSpeech = text
-      .replace(/```[\s\S]*?```/g, 'কোড ব্লক বিস্তারিত স্ক্রিনে প্রদর্শিত হচ্ছে।')
-      .replace(/[#*`_]/g, '')
-      .slice(0, 450); // Keep voice response digestible
+      // Clean markdown code blocks and formatting from speech for natural audio
+      const cleanSpeech = text
+        .replace(/```[\s\S]*?```/g, 'কোড ব্লক স্ক্রিনে দেওয়া হলো।')
+        .replace(/[*#`_~]/g, '')
+        .replace(/https?:\/\/\S+/g, '')
+        .slice(0, 450);
 
-    const utterance = new SpeechSynthesisUtterance(cleanSpeech);
-    utterance.rate = speechRate;
-    utterance.pitch = 1.0;
+      const utterance = new SpeechSynthesisUtterance(cleanSpeech);
+      utterance.rate = Math.max(0.8, Math.min(1.3, speechRate));
+      utterance.pitch = 1.0;
 
-    // Pick best voice for Bengali or English
-    const voices = window.speechSynthesis.getVoices();
-    const bnVoice = voices.find((v) => v.lang.includes('bn') || v.lang.includes('BD') || v.lang.includes('IN'));
-    if (bnVoice && language === 'bn') {
-      utterance.voice = bnVoice;
-      utterance.lang = bnVoice.lang;
-    } else {
-      utterance.lang = language === 'bn' ? 'bn-BD' : 'en-US';
+      const voices = window.speechSynthesis.getVoices();
+      const bnVoice = voices.find(
+        (v) =>
+          v.lang.toLowerCase().includes('bn') ||
+          v.name.toLowerCase().includes('bengali') ||
+          v.name.toLowerCase().includes('bangla')
+      );
+
+      if (bnVoice && language === 'bn') {
+        utterance.voice = bnVoice;
+        utterance.lang = bnVoice.lang;
+      } else {
+        const preferredVoice = voices.find((v) => v.default) || voices[0];
+        if (preferredVoice) {
+          utterance.voice = preferredVoice;
+          utterance.lang = preferredVoice.lang;
+        }
+      }
+
+      // Prevent garbage collection bug in Chrome
+      (window as any)._currentUtterance = utterance;
+
+      utterance.onstart = () => {
+        setIsSpeaking(true);
+        setAppState('SPEAKING');
+      };
+
+      utterance.onend = () => {
+        setIsSpeaking(false);
+        (window as any)._currentUtterance = null;
+        setAppState('IDLE');
+      };
+
+      utterance.onerror = (e) => {
+        console.warn('TTS utterance event:', e);
+        setIsSpeaking(false);
+        (window as any)._currentUtterance = null;
+        setAppState('IDLE');
+      };
+
+      window.speechSynthesis.speak(utterance);
+    } catch (ttsErr) {
+      console.warn('Speech synthesis error:', ttsErr);
+      setIsSpeaking(false);
+      setAppState('IDLE');
     }
-
-    utterance.onstart = () => {
-      setIsSpeaking(true);
-      setAppState('SPEAKING');
-    };
-
-    utterance.onend = () => {
-      setIsSpeaking(false);
-      setAppState('IDLE');
-    };
-
-    utterance.onerror = () => {
-      setIsSpeaking(false);
-      setAppState('IDLE');
-    };
-
-    window.speechSynthesis.speak(utterance);
   };
 
   // API Call helper for Chat
@@ -154,6 +180,17 @@ export default function App() {
     const newHistory = [...currentMessages, userMsg];
     setCurrentMessages(newHistory);
 
+    // Check if voice input contains app navigation commands
+    const localIntent = processConversationalInput(text, language, memories);
+    if (localIntent.action === 'navigate' && localIntent.targetTab) {
+      setActiveTab(localIntent.targetTab);
+      soundEffects.playBeep();
+    } else if (text.includes('সাউন্ড বন্ধ') || text.toLowerCase().includes('mute sound')) {
+      setSoundEnabled(false);
+    } else if (text.includes('সাউন্ড চালু') || text.toLowerCase().includes('unmute sound')) {
+      setSoundEnabled(true);
+    }
+
     try {
       const systemInstruction = buildSystemPrompt(language, memories);
 
@@ -164,11 +201,13 @@ export default function App() {
           message: text,
           systemInstruction,
           history: newHistory,
+          language,
+          memories,
         }),
       });
 
       const data = await res.json();
-      const assistantText = data.text || 'কোনো উত্তর পাওয়া যায়নি।';
+      const assistantText = data.text || localIntent.responseText || 'আমি আপনার কথাটি শুনেছি এবং বুঝতে পেরেছি।';
 
       const assistantMsg: ChatMessage = {
         id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,

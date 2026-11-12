@@ -10,6 +10,8 @@ import {
   AlertCircle,
   Copy,
   Check,
+  Radio,
+  CheckCircle2,
 } from 'lucide-react';
 import { AppState, ChatMessage, Language } from '../types';
 import { JarvisOrb } from './JarvisOrb';
@@ -43,8 +45,11 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
   const [micSupported, setMicSupported] = useState(true);
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [liveHeardText, setLiveHeardText] = useState('');
 
   const recognitionRef = useRef<any>(null);
+  const transcriptRef = useRef<string>('');
+  const isListeningRef = useRef<boolean>(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   // Auto-scroll messages
@@ -52,7 +57,12 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, appState]);
 
-  // Initialize Web Speech Recognition
+  // Keep ref in sync
+  useEffect(() => {
+    isListeningRef.current = isListening;
+  }, [isListening]);
+
+  // Initialize Speech Recognition once, dependent only on language
   useEffect(() => {
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -62,87 +72,142 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
       return;
     }
 
-    const recognition = new SpeechRecognition();
-    recognition.continuous = false;
-    recognition.interimResults = true;
-    recognition.lang = language === 'bn' ? 'bn-BD' : 'en-US';
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true; // Stay listening until silence or user taps stop
+      recognition.interimResults = true;
+      recognition.lang = language === 'bn' ? 'bn-BD' : 'en-US';
 
-    recognition.onstart = () => {
-      setIsListening(true);
-      setAppState('LISTENING');
-      setSpeechError(null);
-      soundEffects.playWake();
-    };
+      recognition.onstart = () => {
+        setIsListening(true);
+        isListeningRef.current = true;
+        setAppState('LISTENING');
+        setSpeechError(null);
+        transcriptRef.current = '';
+        setLiveHeardText('');
+        soundEffects.playWake();
+      };
 
-    recognition.onresult = (event: any) => {
-      const current = event.resultIndex;
-      const transcript = event.results[current][0].transcript;
-      setInputText(transcript);
-    };
+      recognition.onresult = (event: any) => {
+        let accumulated = '';
+        for (let i = 0; i < event.results.length; ++i) {
+          accumulated += event.results[i][0].transcript + ' ';
+        }
+        const text = accumulated.trim();
+        if (text) {
+          transcriptRef.current = text;
+          setLiveHeardText(text);
+          setInputText(text);
+        }
+      };
 
-    recognition.onerror = (event: any) => {
-      console.warn('Speech recognition error:', event.error);
-      setIsListening(false);
-      if (event.error === 'not-allowed') {
-        setSpeechError(
-          language === 'bn'
-            ? 'মাইক্রোফোন অনুমতি পাওয়া যায়নি। ব্রাউজার সেটিংস থেকে অনুমতি দিন।'
-            : 'Microphone permission denied. Please grant microphone access.'
-        );
-      } else if (event.error !== 'no-speech') {
-        setSpeechError(
-          language === 'bn'
-            ? `স্পীচ রিকগনিশন ত্রুটি: ${event.error}`
-            : `Speech error: ${event.error}`
-        );
-      }
-      setAppState('ERROR');
-      soundEffects.playError();
-      setTimeout(() => setAppState('IDLE'), 2500);
-    };
+      recognition.onerror = (event: any) => {
+        console.warn('Speech recognition status:', event.error);
+        if (event.error === 'not-allowed' || event.error === 'permission-denied') {
+          setSpeechError(
+            language === 'bn'
+              ? 'মাইক্রোফোন পারমিশন ব্লক রয়েছে। ব্রাউজার অ্যাড্রেস বার থেকে মাইক্রোফোন Allow করুন।'
+              : 'Microphone blocked. Please allow microphone in browser address bar.'
+          );
+          setIsListening(false);
+          isListeningRef.current = false;
+          setAppState('ERROR');
+          soundEffects.playError();
+        } else if (event.error === 'no-speech') {
+          // Normal silence, don't crash
+        } else {
+          setSpeechError(
+            language === 'bn'
+              ? `স্পীচ তথ্য: ${event.error}`
+              : `Speech event: ${event.error}`
+          );
+        }
+      };
 
-    recognition.onend = () => {
-      setIsListening(false);
-      if (inputText.trim()) {
-        handleSubmit(inputText);
-      } else if (appState === 'LISTENING') {
-        setAppState('IDLE');
-      }
-    };
+      recognition.onend = () => {
+        setIsListening(false);
+        isListeningRef.current = false;
 
-    recognitionRef.current = recognition;
+        const spoken = transcriptRef.current.trim();
+        if (spoken) {
+          transcriptRef.current = '';
+          setLiveHeardText('');
+          handleSubmit(spoken);
+        } else if (appState === 'LISTENING') {
+          setAppState('IDLE');
+        }
+      };
+
+      recognitionRef.current = recognition;
+    } catch (err: any) {
+      console.warn('Recognition setup error:', err);
+      setMicSupported(false);
+    }
 
     return () => {
       try {
-        recognition.abort();
-      } catch {
-        // Safe cleanup
-      }
+        if (recognitionRef.current) {
+          recognitionRef.current.onend = null;
+          recognitionRef.current.abort();
+        }
+      } catch {}
     };
-  }, [language, appState, inputText]);
+  }, [language]);
 
-  const toggleListen = () => {
+  const toggleListen = async () => {
     if (isSpeaking) {
       onStopSpeaking();
     }
 
-    if (isListening) {
-      recognitionRef.current?.stop();
+    if (isListeningRef.current) {
+      // User tapped stop listening -> process whatever was heard
+      try {
+        recognitionRef.current?.stop();
+      } catch {}
       setIsListening(false);
-      setAppState('IDLE');
-      soundEffects.playBeep();
+      isListeningRef.current = false;
+      const spoken = transcriptRef.current.trim() || inputText.trim();
+      if (spoken) {
+        transcriptRef.current = '';
+        setLiveHeardText('');
+        handleSubmit(spoken);
+      } else {
+        setAppState('IDLE');
+        soundEffects.playBeep();
+      }
     } else {
+      // First ensure microphone permission via getUserMedia
+      try {
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+          await navigator.mediaDevices.getUserMedia({ audio: true }).then((mediaStream) => {
+            // Close the test stream immediately
+            mediaStream.getTracks().forEach((t) => t.stop());
+          });
+        }
+      } catch (err: any) {
+        console.warn('Microphone permission check failed:', err);
+        setSpeechError(
+          language === 'bn'
+            ? 'মাইক্রোফোনের অনুমতি দিন (Allow Microphone)।'
+            : 'Please grant microphone permission.'
+        );
+        return;
+      }
+
       try {
         setInputText('');
+        setLiveHeardText('');
+        transcriptRef.current = '';
         setSpeechError(null);
         recognitionRef.current?.start();
       } catch (err: any) {
-        console.warn('Recognition start error:', err);
-        // If already started, stop then restart
-        recognitionRef.current?.stop();
-        setTimeout(() => {
-          recognitionRef.current?.start();
-        }, 150);
+        console.warn('Recognition restart:', err);
+        try {
+          recognitionRef.current?.stop();
+          setTimeout(() => {
+            recognitionRef.current?.start();
+          }, 150);
+        } catch {}
       }
     }
   };
@@ -151,11 +216,12 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
     const text = textToSend.trim();
     if (!text) return;
 
-    if (isListening) {
+    if (isListeningRef.current) {
       try {
         recognitionRef.current?.stop();
       } catch {}
       setIsListening(false);
+      isListeningRef.current = false;
     }
 
     if (isSpeaking) {
@@ -164,6 +230,8 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
 
     soundEffects.playBeep();
     setInputText('');
+    setLiveHeardText('');
+    transcriptRef.current = '';
     setSpeechError(null);
     setAppState('PROCESSING');
 
@@ -205,7 +273,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             <button
               onClick={onClearHistory}
               title="কথোপকথন মুছুন"
-              className="flex items-center gap-1 px-2.5 py-1 text-xs text-slate-400 hover:text-rose-400 bg-slate-900/60 border border-slate-800 rounded-lg transition-colors"
+              className="flex items-center gap-1 px-2.5 py-1 text-xs text-slate-400 hover:text-rose-400 bg-slate-900/60 border border-slate-800 rounded-lg transition-colors cursor-pointer"
             >
               <RotateCcw className="w-3.5 h-3.5" />
               <span className="hidden xs:inline">{language === 'bn' ? 'মুছুন' : 'Clear'}</span>
@@ -215,7 +283,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
           {isSpeaking && (
             <button
               onClick={onStopSpeaking}
-              className="flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-lg bg-rose-600/30 text-rose-300 border border-rose-500/40 hover:bg-rose-600/40 transition-colors animate-pulse"
+              className="flex items-center gap-1.5 px-3 py-1 text-xs font-semibold rounded-lg bg-rose-600/30 text-rose-300 border border-rose-500/40 hover:bg-rose-600/40 transition-colors animate-pulse cursor-pointer"
             >
               <VolumeX className="w-3.5 h-3.5" />
               <span>{language === 'bn' ? 'কথা থামান' : 'Interrupt'}</span>
@@ -234,24 +302,53 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
           size="md"
         />
 
-        <div className="mt-2 text-center">
-          <p className="text-xs text-slate-300">
-            {isListening
-              ? language === 'bn'
-                ? 'বলুন, আমি শুনছি...'
-                : 'Listening to your voice...'
-              : isSpeaking
-              ? language === 'bn'
-                ? 'FAHIM AI উত্তর দিচ্ছে (থামাতে বাটনে ট্যাপ করুন)...'
-                : 'FAHIM AI is speaking (tap to interrupt)...'
-              : appState === 'PROCESSING'
-              ? language === 'bn'
-                ? 'বিশ্লেষণ ও ভাবছি...'
-                : 'Processing your request...'
-              : language === 'bn'
-              ? 'কথা বলতে নিচের মাইক বাটনে বা কোর অর্বে ট্যাপ করুন'
-              : 'Tap microphone or Orb to start speaking'}
-          </p>
+        {/* Live Audio Listening Feedback */}
+        <div className="mt-2 text-center max-w-md px-4">
+          {isListening ? (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-center gap-2 text-xs font-bold text-emerald-400 animate-pulse">
+                <Radio className="w-3.5 h-3.5" />
+                <span>
+                  {language === 'bn'
+                    ? 'মাইক্রোফোন চালু — কথা বলুন...'
+                    : 'Microphone Active — Speak Now...'}
+                </span>
+              </div>
+              {liveHeardText ? (
+                <div className="p-2 rounded-lg bg-slate-900/90 border border-emerald-500/40 text-xs text-emerald-300 font-medium">
+                  "{liveHeardText}"
+                </div>
+              ) : (
+                <p className="text-[11px] text-slate-400">
+                  {language === 'bn'
+                    ? 'আপনার কণ্ঠস্বর শোনা হচ্ছে... কথা শেষ হলে "উত্তর শুনুন" বাটনে চাপ দিন বা থামুন।'
+                    : 'Listening to your speech...'}
+                </p>
+              )}
+              <button
+                onClick={toggleListen}
+                className="mt-1 px-4 py-1.5 rounded-full text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-black shadow-lg shadow-emerald-500/30 transition-all cursor-pointer"
+              >
+                {language === 'bn' ? 'কথা শেষ করেছি, উত্তর শুনুন' : 'Done Speaking, Get Reply'}
+              </button>
+            </div>
+          ) : isSpeaking ? (
+            <p className="text-xs text-sky-300 animate-pulse font-medium">
+              {language === 'bn'
+                ? '🔊 FAHIM AI কথা বলছে... (থামাতে অর্ব বা বাটনে চাপুন)'
+                : '🔊 FAHIM AI is speaking... (tap to interrupt)'}
+            </p>
+          ) : appState === 'PROCESSING' ? (
+            <p className="text-xs text-cyan-400 animate-pulse font-medium">
+              {language === 'bn' ? '⚡ আপনার কথাটি বিশ্লেষণ করছি...' : '⚡ Processing your request...'}
+            </p>
+          ) : (
+            <p className="text-xs text-slate-300">
+              {language === 'bn'
+                ? 'কথা বলতে নিচের মাইক বা সেন্ট্রাল অর্বে ট্যাপ করুন'
+                : 'Tap microphone or Orb to start speaking'}
+            </p>
+          )}
         </div>
 
         {speechError && (
@@ -265,18 +362,35 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
       {/* Conversation Stream */}
       <div className="flex-1 overflow-y-auto space-y-3 px-2 py-3 rounded-xl bg-slate-950/60 border border-slate-800/80">
         {messages.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-center p-6 text-slate-400 space-y-3">
-            <Sparkles className="w-8 h-8 text-cyan-400/60 animate-pulse-slow" />
-            <p className="text-sm font-semibold text-slate-300">
+          <div className="h-full flex flex-col items-center justify-center text-center p-4 sm:p-6 text-slate-400 space-y-3">
+            <Sparkles className="w-8 h-8 text-cyan-400/80 animate-pulse-slow" />
+            <p className="text-sm font-semibold text-slate-200">
               {language === 'bn'
-                ? 'FAHIM AI ভয়েস সহকারী প্রস্তুত।'
-                : 'FAHIM AI Voice Assistant Ready.'}
+                ? 'FAHIM AI স্মার্ট ভয়েস সহকারী প্রস্তুত।'
+                : 'FAHIM AI Smart Voice Assistant Ready.'}
             </p>
-            <p className="text-xs text-slate-500 max-w-sm">
+            <p className="text-xs text-slate-400 max-w-sm">
               {language === 'bn'
-                ? 'বাংলা বা ইংরেজিতে কথা বলুন। ট্রেডিং, কোডিং, স্ক্রিন ভিশন বা যেকোনো তথ্য জিজ্ঞাসা করতে পারেন।'
-                : 'Speak in Bengali or English. Ask about charts, coding, device settings, or screen vision.'}
+                ? 'বাংলায় আপনার স্বাভাবিক ভাষায় কথা বলুন। নিচের যেকোনো প্রশ্নে ট্যাপ করে বা মাইকে বলুন:'
+                : 'Speak naturally in Bengali or English. Tap any sample query or use the mic:'}
             </p>
+
+            <div className="flex flex-wrap justify-center gap-2 pt-2 max-w-md">
+              {[
+                { bn: '👋 কেমন আছো? তোমার পরিচয় দাও', en: '👋 Who are you?' },
+                { bn: '📈 ট্রেডিং চার্টের সাপোর্ট রেজিস্ট্যান্স কীভাবে বুঝব?', en: '📈 How to find support & resistance?' },
+                { bn: '⚡ Honor X6b ফোনের র‍্যাম কীভাবে বাড়াব?', en: '⚡ Honor X6b RAM Turbo setup' },
+                { bn: '🖥️ স্ক্রিন ভিশন কীভাবে কাজ করে?', en: '🖥️ How does Screen Vision work?' },
+              ].map((chip, idx) => (
+                <button
+                  key={idx}
+                  onClick={() => handleSubmit(language === 'bn' ? chip.bn : chip.en)}
+                  className="px-3 py-1.5 rounded-full text-xs bg-slate-900 hover:bg-cyan-950 border border-cyan-500/30 text-cyan-300 hover:border-cyan-400 transition-all cursor-pointer shadow-sm active:scale-95"
+                >
+                  {language === 'bn' ? chip.bn : chip.en}
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
           messages.map((msg) => (
@@ -305,15 +419,16 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
                   <div className="mt-2 pt-2 border-t border-cyan-500/10 flex items-center justify-end gap-2 text-xs text-slate-400">
                     <button
                       onClick={() => onSpeakText(msg.content)}
-                      title="পুনরায় অডিও শুনুন"
-                      className="p-1 hover:text-cyan-300 transition-colors"
+                      title="অডিও শুনুন"
+                      className="flex items-center gap-1 px-2 py-0.5 rounded bg-cyan-950/60 hover:bg-cyan-900 text-cyan-300 border border-cyan-500/30 transition-colors cursor-pointer text-[11px]"
                     >
                       <Volume2 className="w-3.5 h-3.5" />
+                      <span>{language === 'bn' ? 'অডিও শুনুন' : 'Speak'}</span>
                     </button>
                     <button
                       onClick={() => copyMessage(msg.content, msg.id)}
                       title="কপি করুন"
-                      className="p-1 hover:text-cyan-300 transition-colors"
+                      className="p-1 hover:text-cyan-300 transition-colors cursor-pointer"
                     >
                       {copiedId === msg.id ? (
                         <Check className="w-3.5 h-3.5 text-emerald-400" />
@@ -344,16 +459,16 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             type="button"
             onClick={toggleListen}
             disabled={!micSupported}
-            className={`p-3 rounded-xl transition-all shadow-md flex-shrink-0 active:scale-95 ${
+            className={`p-3 rounded-xl transition-all shadow-md flex-shrink-0 active:scale-95 cursor-pointer ${
               isListening
-                ? 'bg-rose-600 text-white animate-pulse shadow-rose-600/40'
+                ? 'bg-rose-600 text-white animate-pulse shadow-rose-600/40 ring-2 ring-rose-400'
                 : 'bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 text-black shadow-cyan-500/30'
             }`}
             title={
               !micSupported
                 ? 'ব্রাউজারে মাইক্রোফোন সমর্থিত নয়'
                 : isListening
-                ? 'শোনা বন্ধ করুন'
+                ? 'শোনা শেষ করুন ও উত্তর শুনুন'
                 : 'মাইক্রোফোনে কথা বলুন'
             }
           >
@@ -368,8 +483,8 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             placeholder={
               isListening
                 ? language === 'bn'
-                  ? 'শুনছি...'
-                  : 'Listening...'
+                  ? 'শুনছি... কথা বলা শেষ হলে সেন্ড বা মাইকে চাপ দিন'
+                  : 'Listening... tap mic when done'
                 : language === 'bn'
                 ? 'বাংলায় মেসেজ লিখুন বা মাইকে বলুন...'
                 : 'Type message or use voice...'
@@ -381,7 +496,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
           <button
             type="submit"
             disabled={!inputText.trim() || appState === 'PROCESSING'}
-            className="p-3 rounded-xl bg-cyan-950/70 hover:bg-cyan-900/80 text-cyan-300 border border-cyan-500/40 disabled:opacity-40 disabled:cursor-not-allowed transition-all active:scale-95 flex-shrink-0"
+            className="p-3 rounded-xl bg-cyan-950/70 hover:bg-cyan-900/80 text-cyan-300 border border-cyan-500/40 disabled:opacity-40 disabled:cursor-not-allowed transition-all active:scale-95 flex-shrink-0 cursor-pointer"
           >
             <Send className="w-5 h-5" />
           </button>
